@@ -37,7 +37,17 @@ Then open `http://localhost:3002`.
 
 ## How the numbers are computed
 
-All ranges are bounded in Dubai local time (`Asia/Dubai`), from the start of the range through "now".
+All ranges are bounded in Dubai local time (`Asia/Dubai`), from the start of the range through "now". Custom ranges accept naive `YYYY-MM-DDTHH:mm` datetimes that are interpreted as Dubai local time (the Dubai offset is +04:00 year-round).
+
+| Selector | Window |
+|---|---|
+| Today | Start of today → now (Dubai) |
+| Last 7 Days / Last 30 Days | The preceding 7 / 30 days through now |
+| Custom Range | Any window picked in the From/To pickers; `from` must be before `to`. Impossible dates (e.g. 2026-02-30) and bad formats are rejected with a 400. |
+
+## Endpoint
+
+`GET /api/leadflow?range=today|7d|30d` or `/api/leadflow?from=YYYY-MM-DDTHH:mm&to=YYYY-MM-DDTHH:mm`. Responses are never HTTP-cached (`Cache-Control: no-store`) so you always see live CRM data.
 
 | Column | Rule |
 |---|---|
@@ -67,4 +77,5 @@ public/
 ## Notes
 
 - The `/api/leadflow?range=today|7d|30d` endpoint is always served from an in-memory cache that refreshes on a background loop, so requests are fast; the cache itself reflects live CRM data (never HTTP-cached). A custom window can be requested with `?from=YYYY-MM-DDTHH:mm&to=YYYY-MM-DDTHH:mm` — both values are interpreted as Dubai local time, computed on demand (cached briefly, then evicted), and rejected with a 400 if invalid (bad format, impossible date, or `from` not before `to`).
+- Only one dashboard computation runs at a time (the background refresh loops and on-demand requests share a queue, and user requests jump ahead of background refreshes), which keeps the Bitrix24 rolling request-rate budget under its `QUERY_LIMIT_EXCEEDED` limit. After a heavy computation the next is delayed briefly by a cooldown so the budget refills. To keep custom ranges fast, per-lead lookups (stage history, timeline comments, lead assignee) are cached in memory for a few minutes, so ranges that overlap in time reuse previously fetched data instead of refetching from Bitrix. First load of a large window takes longest (~10–90s depending on size); repeats and narrower overlapping windows are near-instant.
 - Static assets (`app.js`, `styles.css`, vendor bundles) are served with a 1-hour browser cache lifetime; `index.html` is always revalidated. When iterating on the frontend, use a private/incognito tab (or hard refresh) to see changes immediately.
