@@ -179,6 +179,67 @@ const PROPERTY_FINDER_SOURCE_ID = 'UC_E5UPNG';
 // Deal pipeline (crm.dealcategory) that also feeds "Fresh Leads received - Secondary".
 const RENTAL_LEADS_CATEGORY_ID = 13;
 
+// Current-pipeline stage counts (range-independent): status IDs reused from
+// the transition rules above, where each is already documented by name.
+const CURRENT_PIPELINE_STATUSES = {
+  assigned: 'UC_UYK1YZ',       // Assigned
+  reshuffled: 'UC_HKU9EC',     // Reshuffled - Assigned
+  noAnswer: '4',                // No Answer
+  cold: '6',                    // Cold
+  warm: '2',                    // Warm
+  hot: '7',                     // Hot
+};
+
+// Counts leads currently sitting in each of the CURRENT_PIPELINE_STATUSES
+// stages, grouped by assigned agent. No date filter — this reflects the
+// live pipeline as it stands right now, not activity within a range.
+async function fetchCurrentStageCounts() {
+  const statusIds = Object.values(CURRENT_PIPELINE_STATUSES);
+  const leads = await bx.fetchAll(
+    'crm.lead.list',
+    { '@STATUS_ID': statusIds },
+    ['ID', 'ASSIGNED_BY_ID', 'STATUS_ID'],
+  );
+  const statusByLabel = CURRENT_PIPELINE_STATUSES;
+  const countsByAgent = {};
+  for (const lead of leads) {
+    const uid = lead.ASSIGNED_BY_ID;
+    if (uid == null) continue;
+    const label = Object.keys(statusByLabel).find(k => statusByLabel[k] === lead.STATUS_ID);
+    if (!label) continue;
+    const bucket = (countsByAgent[uid] ||= {});
+    bucket[label] = (bucket[label] || 0) + 1;
+  }
+  return countsByAgent;
+}
+
+async function computeCurrentStageCounts() {
+  const [agents, countsByAgent] = await Promise.all([
+    fetchActiveAgents(),
+    fetchCurrentStageCounts(),
+  ]);
+  const rows = agents.map(a => {
+    const c = countsByAgent[a.id] || {};
+    const assigned = c.assigned || 0;
+    const reshuffled = c.reshuffled || 0;
+    const noAnswer = c.noAnswer || 0;
+    const cold = c.cold || 0;
+    const warm = c.warm || 0;
+    const hot = c.hot || 0;
+    return {
+      ...a,
+      assigned,
+      reshuffled,
+      noAnswer,
+      cold,
+      warm,
+      hot,
+      total: assigned + reshuffled + noAnswer + cold + warm + hot,
+    };
+  });
+  return { agents: rows, updatedAt: new Date().toISOString() };
+}
+
 function countByAssignee(items) {
   const counts = {};
   for (const item of items) {
@@ -517,13 +578,13 @@ let pendingUserRequests = 0;
 // next queued computation waits a short cooldown before starting.
 const COMPUTE_COOLDOWN_MS = 5_000;
 
-function enqueueCompute(bounds, background) {
+function enqueueCompute(fn, background) {
   if (!background) pendingUserRequests++;
   const run = computeQueue.then(async () => {
     // A background refresh can be skipped if a user request is waiting: the
     // loop simply retries on its next interval, keeping the cache warm.
     if (background && pendingUserRequests > 0) return null;
-    const result = await computeDashboard(bounds);
+    const result = await fn();
     await sleep(COMPUTE_COOLDOWN_MS);
     return result;
   }).finally(() => {
@@ -538,7 +599,7 @@ function enqueueCompute(bounds, background) {
 // overlapping) share the same in-flight promise instead of double-computing.
 function refreshRange(key, bounds, background = false) {
   if (inFlight.has(key)) return inFlight.get(key);
-  const p = enqueueCompute(bounds, background)
+  const p = enqueueCompute(() => computeDashboard(bounds), background)
     .then(data => {
       if (data) { cache.set(key, data); trimCache(); }
       return data;
@@ -549,6 +610,27 @@ function refreshRange(key, bounds, background = false) {
     })
     .finally(() => inFlight.delete(key));
   inFlight.set(key, p);
+  return p;
+}
+
+// Current-pipeline stage counts are range-independent (no `bounds`), so they
+// get their own cache slot rather than a `cache` entry keyed by range.
+let stageCountsCache = null; // { agents, updatedAt }
+let stageCountsInFlight = null;
+
+function refreshStageCounts(background = false) {
+  if (stageCountsInFlight) return stageCountsInFlight;
+  const p = enqueueCompute(computeCurrentStageCounts, background)
+    .then(data => {
+      if (data) stageCountsCache = data;
+      return data;
+    })
+    .catch(err => {
+      console.error('Refresh failed for stage counts:', err.message);
+      throw err;
+    })
+    .finally(() => { stageCountsInFlight = null; });
+  stageCountsInFlight = p;
   return p;
 }
 
@@ -588,13 +670,33 @@ app.get('/api/leadflow', async (req, res) => {
     bounds = getRangeBounds(range);
   }
 
-  const cached = cache.get(key);
-  if (cached) return res.json(cached);
+  // The refresh button asks for `force=1` to bypass the cache and wait for a
+  // live recompute — otherwise this would always just re-serve whatever the
+  // background loop last cached, which can be up to its interval stale.
+  const force = req.query.force === '1';
+  if (!force) {
+    const cached = cache.get(key);
+    if (cached) return res.json(cached);
+  }
 
   // Nothing cached yet for this range (first hit since server start) — wait
   // for the one computation in flight rather than failing the request.
     try {
     const data = await refreshRange(key, bounds, false);
+    res.json(data);
+  } catch (err) {
+    res.status(503).json({ error: 'Dashboard data is still warming up — please retry shortly.' });
+  }
+});
+
+// Current pipeline-by-stage counts: no date range, always "right now", so
+// there's a single route/cache instead of one per range key.
+app.get('/api/leadflow/stage-counts', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const force = req.query.force === '1';
+  if (!force && stageCountsCache) return res.json(stageCountsCache);
+  try {
+    const data = await refreshStageCounts(false);
     res.json(data);
   } catch (err) {
     res.status(503).json({ error: 'Dashboard data is still warming up — please retry shortly.' });
@@ -617,10 +719,23 @@ function startRefreshLoop(range, intervalMs) {
   tick();
 }
 
+function startStageCountsRefreshLoop(intervalMs) {
+  async function tick() {
+    try {
+      await refreshStageCounts(true);
+    } catch {
+      // Already logged inside refreshStageCounts; keep the loop alive.
+    }
+    setTimeout(tick, intervalMs);
+  }
+  tick();
+}
+
 const PORT = process.env.LEADFLOW_PORT || 3002;
 app.listen(PORT, () => {
   console.log(`LeadFlow dashboard running at http://localhost:${PORT}`);
   startRefreshLoop('today', 30_000);
   setTimeout(() => startRefreshLoop('7d', 60_000), 5_000);
   setTimeout(() => startRefreshLoop('30d', 120_000), 15_000);
+  setTimeout(() => startStageCountsRefreshLoop(60_000), 10_000);
 });
