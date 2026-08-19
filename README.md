@@ -1,6 +1,6 @@
 # LeadFlow — K Estates Lead Flow Dashboard
 
-A live dashboard that tracks per-agent lead activity in Bitrix24 CRM: fresh leads received, reshuffled leads assigned, leads contacted, and leads with no answer — broken down by sales agent, for Today / Last 7 Days / Last 30 Days.
+A live dashboard that tracks per-agent lead activity in Bitrix24 CRM: fresh leads received, reshuffled leads assigned, leads contacted, and leads with no answer — broken down by sales agent, for Today / Last 7 Days / Last 30 Days / any custom date-time range.
 
 ## Stack
 
@@ -66,5 +66,5 @@ public/
 
 ## Notes
 
-- The `/api/leadflow?range=today|7d|30d` endpoint is always served from an in-memory cache that refreshes on a background loop, so requests are fast; the cache itself reflects live CRM data (never HTTP-cached).
+- The `/api/leadflow?range=today|7d|30d` endpoint is always served from an in-memory cache that refreshes on a background loop, so requests are fast; the cache itself reflects live CRM data (never HTTP-cached). A custom window can be requested with `?from=YYYY-MM-DDTHH:mm&to=YYYY-MM-DDTHH:mm` — both values are interpreted as Dubai local time, computed on demand (cached briefly, then evicted), and rejected with a 400 if invalid (bad format, impossible date, or `from` not before `to`).
 - Static assets (`app.js`, `styles.css`, vendor bundles) are served with a 1-hour browser cache lifetime; `index.html` is always revalidated. When iterating on the frontend, use a private/incognito tab (or hard refresh) to see changes immediately.

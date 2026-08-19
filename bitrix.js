@@ -50,16 +50,17 @@ export function createClient(webhook) {
     }
   }
 
-  async function call(method, params = {}, tries = 5) {
+  async function call(method, params = {}, tries = 6) {
     for (let i = 0; i < tries; i++) {
       const data = await fetchRetry(method, params);
       if (!data.error) return data;
       // The portal enforces a rolling request budget; back off and retry
-      // rather than failing the whole dashboard request.
+      // rather than failing the whole dashboard request. The budget takes
+      // seconds to refill, so the backoff is longer than the generic one.
       if (data.error !== 'QUERY_LIMIT_EXCEEDED' || i === tries - 1) {
         throw new Error(`${method}: ${data.error} — ${data.error_description || ''}`.trim());
       }
-      await sleep(1000 * (i + 1));
+      await sleep(3000 * (i + 1));
     }
   }
 
@@ -81,12 +82,15 @@ export function createClient(webhook) {
         if (!(k in raw)) next[k] = pending[k];
       }
       pending = next;
-      if (Object.keys(pending).length > 0 && attempt < 4) await sleep(1500 * (attempt + 1));
+      if (Object.keys(pending).length > 0 && attempt < 4) await sleep(3000 * (attempt + 1));
     }
     return items;
   }
 
-  // Pages a *.list method to completion using batched offset requests.
+  // Pages a *.list method to completion using batched offset requests. Each
+  // batch is one HTTP request whose pages the portal executes sequentially, so
+  // a few batches run concurrently (not one giant batch) to overlap their
+  // server-side work without bursting the request-rate budget.
   async function fetchAll(method, filter = {}, select = [], extra = {}) {
     const first = await call(method, { filter, select, ...extra, start: 0 });
     const total = first.total || 0;
@@ -98,16 +102,26 @@ export function createClient(webhook) {
     const pageSize = 50;
     const numPages = Math.ceil(total / pageSize);
     const baseCmd = method + '?' + qs({ filter, select, ...extra });
-    for (let page = 1; page < numPages; page += 50) {
+    const pagesPerBatch = 50;
+    const batches = [];
+    for (let page = 1; page < numPages; page += pagesPerBatch) {
       const cmd = {};
-      const size = Math.min(50, numPages - page);
+      const size = Math.min(pagesPerBatch, numPages - page);
       for (let j = 0; j < size; j++) cmd['p' + (page + j)] = baseCmd + '&start=' + ((page + j) * pageSize);
-      const items = await batch(cmd);
-      for (const key of Object.keys(cmd)) {
-        if (Array.isArray(items[key])) all.push(...items[key]);
-      }
-      if (page + 50 < numPages) await sleep(200);
+      batches.push(cmd);
     }
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(3, batches.length) }, async () => {
+      for (;;) {
+        const idx = next++;
+        if (idx >= batches.length) return;
+        const items = await batch(batches[idx]);
+        for (const key of Object.keys(batches[idx])) {
+          if (Array.isArray(items[key])) all.push(...items[key]);
+        }
+        await sleep(100);
+      }
+    }));
     return all;
   }
 

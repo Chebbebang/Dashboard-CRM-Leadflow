@@ -7,7 +7,20 @@ const RANGE_OPTIONS = [
   { value: 'today', label: 'Today' },
   { value: '7d', label: 'Last 7 Days' },
   { value: '30d', label: 'Last 30 Days' },
+  { value: 'custom', label: 'Custom Range…' },
 ];
+
+// 'YYYY-MM-DDTHH:mm' of `date` in Dubai wall-clock time — the format the
+// custom range inputs use and the API interprets as Asia/Dubai.
+function dubaiLocalValue(date) {
+  const parts = new Intl.DateTimeFormat('en', {
+    timeZone: 'Asia/Dubai',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(date);
+  const get = t => parts.find(p => p.type === t).value;
+  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
+}
 
 const THEME_KEY = 'leadflow-theme';
 
@@ -108,6 +121,29 @@ function App() {
   const [updatedAt, setUpdatedAt] = useState(null);
   const [sortKey, setSortKey] = useState(null);
   const [sortDir, setSortDir] = useState('desc');
+  const [loading, setLoading] = useState(false);
+  // Custom datetime range: draft values in the pickers vs. the range that was
+  // actually applied to the last fetch.
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+  const [appliedFrom, setAppliedFrom] = useState('');
+  const [appliedTo, setAppliedTo] = useState('');
+
+  // Prefill the pickers with a sensible default window (last 7 days through
+  // now, Dubai time) the first time the custom range is selected.
+  useEffect(() => {
+    if (range !== 'custom') return;
+    if (!customFrom) setCustomFrom(dubaiLocalValue(new Date(Date.now() - 7 * 86400000)));
+    if (!customTo) setCustomTo(dubaiLocalValue(new Date()));
+  }, [range, customFrom, customTo]);
+
+  const customValid = Boolean(customFrom && customTo && customFrom < customTo);
+
+  function applyCustomRange() {
+    if (!customValid) return;
+    setAppliedFrom(customFrom);
+    setAppliedTo(customTo);
+  }
 
   function handleSort(key) {
     if (sortKey === key) {
@@ -137,16 +173,22 @@ function App() {
     let cancelled = false;
 
     async function load() {
+      setLoading(true);
       try {
-        const r = await fetch('/api/leadflow?range=' + encodeURIComponent(range));
-        if (!r.ok) throw new Error('Request failed: ' + r.status);
-        const d = await r.json();
+        const qs = range === 'custom'
+          ? 'from=' + encodeURIComponent(appliedFrom) + '&to=' + encodeURIComponent(appliedTo)
+          : 'range=' + encodeURIComponent(range);
+        const r = await fetch('/api/leadflow?' + qs);
+        const d = await r.json().catch(() => null);
+        if (!r.ok) throw new Error(d?.error || 'Request failed: ' + r.status);
         if (cancelled) return;
         setAgents(d.agents || []);
         setUpdatedAt(d.updatedAt || null);
         setError(null);
       } catch (e) {
         if (!cancelled) setError(e.message);
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     }
 
@@ -154,7 +196,7 @@ function App() {
     load();
     const id = setInterval(load, POLL);
     return () => { cancelled = true; clearInterval(id); };
-  }, [range]);
+  }, [range, appliedFrom, appliedTo]);
 
   const lastUpdated = updatedAt
     ? new Date(updatedAt).toLocaleTimeString('en-GB', { timeZone: 'Asia/Dubai', hour: '2-digit', minute: '2-digit' })
@@ -170,11 +212,37 @@ function App() {
         h(ThemeToggle, { theme, setTheme }),
         h('div', { className: 'status' },
           `Updated ${lastUpdated} · `,
+          loading && h('span', { className: 'status-loading' }, 'Loading… · '),
           h('select', {
             className: 'range',
             value: range,
             onChange: e => setRange(e.target.value),
           }, RANGE_OPTIONS.map(o => h('option', { key: o.value, value: o.value }, o.label))),
+        ),
+        range === 'custom' && h('div', { className: 'custom-range' },
+          h('label', { className: 'cr-label' }, 'From'),
+          h('input', {
+            type: 'datetime-local',
+            className: 'cr-input',
+            value: customFrom,
+            max: customTo || undefined,
+            onChange: e => setCustomFrom(e.target.value),
+          }),
+          h('label', { className: 'cr-label' }, 'To'),
+          h('input', {
+            type: 'datetime-local',
+            className: 'cr-input',
+            value: customTo,
+            min: customFrom || undefined,
+            onChange: e => setCustomTo(e.target.value),
+          }),
+          h('button', {
+            type: 'button',
+            className: 'cr-apply',
+            disabled: !customValid,
+            onClick: applyCustomRange,
+          }, 'Apply'),
+          !customValid && h('span', { className: 'cr-hint' }, 'From must be before To'),
         ),
       ),
     ),
@@ -194,20 +262,26 @@ function App() {
               sortedAgents.map((agent, i) => h('tr', { key: agent.id },
                 h('td', { className: 'rank' }, i + 1),
                 h('td', { className: 'name' }, agent.name),
-                COLUMNS.map(col => h('td', {
-                  className: col.key !== null ? 'num live' : 'pending',
-                  key: col.label,
-                }, col.key !== null ? agent[col.key] : '—')),
+                COLUMNS.map(col => {
+                  const val = col.key !== null ? agent[col.key] : null;
+                  return h('td', {
+                    className: val === null ? 'pending' : 'num' + (val > 0 ? ' live' : ''),
+                    key: col.label,
+                  }, val === null ? '—' : val);
+                }),
               )),
             ),
         agents !== null && h('tfoot', null,
           h('tr', null,
             h('td', null),
             h('td', { className: 'tlabel' }, 'Team Total'),
-            COLUMNS.map(col => h('td', {
-              className: 'num' + (col.key !== null ? ' live' : ''),
-              key: col.label,
-            }, col.key !== null ? agents.reduce((s, a) => s + a[col.key], 0) : '—')),
+            COLUMNS.map(col => {
+              const val = agents.reduce((s, a) => s + a[col.key], 0);
+              return h('td', {
+                className: 'num' + (val > 0 ? ' live' : ''),
+                key: col.label,
+              }, val);
+            }),
           ),
         ),
       ),

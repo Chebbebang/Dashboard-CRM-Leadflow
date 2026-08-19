@@ -31,11 +31,25 @@ header .sub{ font-size:11px; color:var(--muted); letter-spacing:.05em; margin-to
 header .meta{ display:flex; flex-direction:column; align-items:flex-end; gap:6px; margin-bottom:0; }
 header .status{ display:flex; align-items:center; gap:6px; font-size:10px; color:var(--faint);
   letter-spacing:.08em; text-transform:uppercase; }
+header .status-loading{ color:var(--muted); }
 
 select.range{ background:var(--ctrl-bg); color:var(--ink); border:1px solid var(--line);
   border-radius:5px; font-family:inherit; font-weight:600; letter-spacing:.05em;
   text-transform:uppercase; cursor:pointer; padding:4px 8px; font-size:10px; }
 select.range:focus{ outline:1px solid var(--muted); }
+
+/* Custom datetime range pickers (shown when "Custom Range…" is selected). */
+.custom-range{ display:flex; align-items:center; gap:5px; }
+.custom-range .cr-label{ font-size:9px; letter-spacing:.08em; text-transform:uppercase; color:var(--faint); }
+.custom-range .cr-input{ background:var(--ctrl-bg); color:var(--ink); border:1px solid var(--line);
+  border-radius:5px; font-family:inherit; font-size:10px; padding:3px 6px; color-scheme:light; }
+:root[data-theme="dark"] .custom-range .cr-input{ color-scheme:dark; }
+.custom-range .cr-input:focus{ outline:1px solid var(--muted); }
+.custom-range .cr-apply{ background:var(--ctrl-active-bg); color:var(--ctrl-active-tx);
+  border:1px solid var(--ctrl-active-bg); border-radius:5px; font-family:inherit; font-weight:600;
+  font-size:9px; letter-spacing:.08em; text-transform:uppercase; cursor:pointer; padding:4px 9px; }
+.custom-range .cr-apply:disabled{ opacity:.4; cursor:not-allowed; }
+.custom-range .cr-hint{ font-size:9px; color:var(--danger); letter-spacing:.03em; }
 
 /* Icon toggle (theme picker) — single button showing the current mode;
    click cycles to the next one. No floating menu to position/clip. */
@@ -87,9 +101,14 @@ tfoot td.num.live{ color:var(--ink); font-weight:800; }
   header{ flex-wrap:wrap; gap:12px; }
   header h1{ font-size:14px; }
   header .sub{ font-size:10px; }
-  header .meta{ width:100%; flex-direction:row; align-items:center; justify-content:space-between; }
+  header .meta{ width:100%; flex-direction:row; flex-wrap:wrap; align-items:center; justify-content:space-between; }
   header .status{ font-size:9.5px; }
   select.range{ padding:7px 9px; font-size:10.5px; }
+  .custom-range{ display:grid; grid-template-columns:auto 1fr; gap:6px 10px; flex-basis:100%; }
+  .custom-range .cr-label{ font-size:10px; align-self:center; }
+  .custom-range .cr-input{ width:100%; min-width:0; padding:9px 10px; font-size:12.5px; }
+  .custom-range .cr-apply{ grid-column:1 / -1; padding:10px; font-size:11px; }
+  .custom-range .cr-hint{ grid-column:1 / -1; }
   .theme-btn{ padding:7px 8px; }
   .theme-btn svg{ width:14px; height:14px; }
   thead th{ padding:8px 8px; font-size:9.5px; }
