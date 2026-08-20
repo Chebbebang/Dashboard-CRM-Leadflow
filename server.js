@@ -587,6 +587,14 @@ async function fetchCommentContactCounts(from, to) {
   }
 
   await mapChunks(leads, async chunk => {
+    // Unlike the other mapChunks call sites in this file (one Bitrix command
+    // per item), this loop batches up to 2 commands per lead (history +
+    // comments) — chunkSize 25 keeps a fully-uncached chunk at exactly 50
+    // commands, Bitrix's hard per-batch cap. A chunk that exceeds it doesn't
+    // fail outright: the overflow commands come back as
+    // ERROR_BATCH_LENGTH_EXCEEDED and bitrix.js's batch() retries them after
+    // a mandatory 3s+ backoff, which was adding tens of seconds on a cold
+    // cache (verified against the live portal).
     const toFetchHistory = chunk.filter(l => cacheGet(historyCache, String(l.ID), HISTORY_TTL_MS) === undefined);
     const toFetchComments = chunk.filter(l => cacheGet(commentCache, String(l.ID), COMMENT_TTL_MS) === undefined);
     const cmd = {};
@@ -631,7 +639,7 @@ async function fetchCommentContactCounts(from, to) {
         }
       }
     }
-  });
+  }, { chunkSize: 25 });
 
   return counts;
 }
@@ -693,18 +701,21 @@ const COMPUTE_COOLDOWN_MS = 5_000;
 
 function enqueueCompute(fn, background) {
   if (!background) pendingUserRequests++;
-  const run = computeQueue.then(async () => {
+  // The cooldown only needs to delay when the *next* queued computation is
+  // allowed to start (so Bitrix's request budget can refill) — it must not
+  // delay handing this computation's own result back to its caller, so it's
+  // chained off `started` onto `computeQueue` separately rather than awaited
+  // before `started` resolves.
+  const started = computeQueue.then(async () => {
     // A background refresh can be skipped if a user request is waiting: the
     // loop simply retries on its next interval, keeping the cache warm.
     if (background && pendingUserRequests > 0) return null;
-    const result = await fn();
-    await sleep(COMPUTE_COOLDOWN_MS);
-    return result;
-  }).finally(() => {
+    return fn();
+  });
+  computeQueue = started.then(() => sleep(COMPUTE_COOLDOWN_MS)).catch(() => {});
+  return started.finally(() => {
     if (!background) pendingUserRequests = Math.max(0, pendingUserRequests - 1);
   });
-  computeQueue = run.catch(() => {});
-  return run;
 }
 
 // Recomputes a range and updates the cache. Concurrent callers for the same
