@@ -97,11 +97,11 @@ const COLUMNS = [
   },
   {
     key: 'contacted', label: 'Leads Contacted',
-    info: 'Two sources, added together: (1) leads that moved directly from a "being worked" stage (Reshuffled - Assigned, Assigned, No Answer, or Leads Pool) into Warm, Hot, or Cold within the selected range, with a same-day timeline comment logged as evidence of real agent work credited to the lead\'s current assignee, only the earliest qualifying transition per lead counts; plus (2) any other timeline comment logged within range while a lead sits in Warm, Hot, Cold, or Leads Pool with no stage change that day credited to the lead\'s current assignee, or for Leads Pool to the comment\'s author (since it\'s public and anyone can comment), capped at one credit per person per lead per day.',
+    info: 'A lead currently sitting in Warm, Hot, or Cold counts if it has a timeline comment logged within the selected range, posted during its current stint in that stage, authored by the lead\'s own current assignee — credited to that assignee. A lead currently in Leads Pool counts the same way, except since Pool has no single responsible person, credit goes to whichever active agent authored the comment. Comments credited to the same person on the same lead less than 20 minutes apart only count once.',
   },
   {
     key: 'noAnswer', label: 'Leads No Answer',
-    info: 'Same mechanism as Contacted, but for transitions from a "being worked" stage (Reshuffled - Assigned, Assigned, Junk, or Leads Pool) directly into No Answer, with a same-day timeline comment required.',
+    info: 'Leads that moved directly from a "being worked" stage (Reshuffled - Assigned, Assigned, Junk, or Leads Pool) into No Answer within the selected range, with a same-day timeline comment logged as evidence of real agent work — credited to the lead\'s current assignee, only the earliest qualifying transition per lead counts.',
   },
 ];
 
