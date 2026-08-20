@@ -1,3 +1,7 @@
 node_modules/
 .env
 .DS_Store
+
+# Local cache snapshot (leadflow-cache.json) that persists server.js's
+# in-memory caches to disk for faster restarts — runtime data, not source.
+.cache/

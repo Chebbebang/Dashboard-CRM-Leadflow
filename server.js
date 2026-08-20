@@ -19,6 +19,8 @@ import express from 'express';
 import helmet from 'helmet';
 import compression from 'compression';
 import 'dotenv/config';
+import fs from 'fs/promises';
+import path from 'path';
 import { createClient, sleep } from './bitrix.js';
 
 const WEBHOOK = process.env.LEADFLOW_WEBHOOK_URL;
@@ -431,7 +433,13 @@ const TRANSITION_RULES = [
 // stage history is very stable (long TTL), timeline comments less so.
 const CACHE_MAX = 8000;
 const HISTORY_TTL_MS = 15 * 60_000;
-const COMMENT_TTL_MS = 5 * 60_000;
+// Was 5 minutes; the whole comment cache tends to get populated in one
+// clustered burst during a cold scan, so a short TTL meant it also went
+// stale in a clustered burst — re-triggering something close to a full
+// re-scan every ~5 minutes indefinitely, not just once at startup. Matching
+// HISTORY_TTL_MS cuts how often that recurs, at the cost of "Contacted"
+// follow-up-comment credit being up to this much staler.
+const COMMENT_TTL_MS = 15 * 60_000;
 const historyCache = new Map(); // lid -> { at, v: [stage-history entries] }
 const commentCache = new Map(); // lid -> { at, v: [timeline comments] }
 
@@ -512,7 +520,10 @@ async function fetchTransitionCounts(toEntries, rules) {
   await mapChunks(qualifyingLeadIds, async chunk => {
     const toFetch = chunk.filter(lid => cacheGet(commentCache, lid, COMMENT_TTL_MS) === undefined);
     const commentCmd = {};
-    for (const lid of toFetch) commentCmd['c' + lid] = `crm.timeline.comment.list?filter[ENTITY_TYPE]=LEAD&filter[ENTITY_ID]=${lid}`;
+    // select is narrowed to just what's read below (CREATED, AUTHOR_ID) —
+    // the default response includes the full comment body, which there's no
+    // reason to pull over the wire or hold in the cache/persisted snapshot.
+    for (const lid of toFetch) commentCmd['c' + lid] = `crm.timeline.comment.list?filter[ENTITY_TYPE]=LEAD&filter[ENTITY_ID]=${lid}&select[0]=ID&select[1]=AUTHOR_ID&select[2]=CREATED`;
 
     const [commentItems, assignees] = await Promise.all([
       toFetch.length ? bx.batch(commentCmd) : Promise.resolve({}),
@@ -602,7 +613,9 @@ async function fetchCommentContactCounts(from, to) {
       cmd['h' + l.ID] = `crm.stagehistory.list?entityTypeId=1&filter[OWNER_ID]=${l.ID}&order[CREATED_TIME]=DESC&select[0]=ID&select[1]=STATUS_ID&select[2]=CREATED_TIME&limit=8`;
     }
     for (const l of toFetchComments) {
-      cmd['c' + l.ID] = `crm.timeline.comment.list?filter[ENTITY_TYPE]=LEAD&filter[ENTITY_ID]=${l.ID}`;
+      // select narrowed to what's read below (CREATED, AUTHOR_ID) — see the
+      // comment on the other crm.timeline.comment.list call in this file.
+      cmd['c' + l.ID] = `crm.timeline.comment.list?filter[ENTITY_TYPE]=LEAD&filter[ENTITY_ID]=${l.ID}&select[0]=ID&select[1]=AUTHOR_ID&select[2]=CREATED`;
     }
     const items = Object.keys(cmd).length ? await bx.batch(cmd) : {};
 
@@ -855,11 +868,182 @@ function startStageCountsRefreshLoop(intervalMs) {
   tick();
 }
 
+// Persists the in-memory caches above to a local JSON file so a restart
+// (deploy, crash, nodemon reload) doesn't force a full cold re-scan of the
+// current pipeline — only genuinely-expired entries get refetched, exactly
+// as if they'd expired during a live run (loadCacheFromDisk hydrates the
+// Maps as-is and lets each entry's own TTL check decide if it's still
+// good). Deliberately excludes in-flight control-flow state (the compute
+// queue, in-flight promises) — only data is persisted.
+const CACHE_FILE = path.join(process.cwd(), '.cache', 'leadflow-cache.json');
+const CACHE_TMP_FILE = CACHE_FILE + '.tmp';
+const LOCK_FILE = CACHE_FILE + '.lock';
+const CACHE_SAVE_INTERVAL_MS = 60_000;
+
+function mapToObj(map) {
+  return Object.fromEntries(map);
+}
+
+function objToMap(obj, map) {
+  for (const [k, v] of Object.entries(obj)) map.set(k, v);
+}
+
+function isPlainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+// Only one process may own the cache file at a time — two independent
+// server processes (e.g. a stray restart racing a nodemon reload, which has
+// happened in practice on this shared dev box) saving to the same path
+// every interval would silently clobber each other with no coordination.
+// This is a single-machine advisory lock (a PID file), not a distributed
+// one — proportionate to that actual failure mode, not a general-purpose
+// locking scheme.
+let canPersist = true;
+let holdsLock = false;
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function acquireCacheLock() {
+  const lockData = JSON.stringify({ pid: process.pid, at: Date.now() });
+  try {
+    await fs.mkdir(path.dirname(LOCK_FILE), { recursive: true });
+    const handle = await fs.open(LOCK_FILE, 'wx'); // exclusive create; fails if it exists
+    await handle.writeFile(lockData);
+    await handle.close();
+    holdsLock = true;
+    return;
+  } catch (err) {
+    if (err.code !== 'EEXIST') {
+      console.error('Failed to create cache lock file — persistence stays best-effort:', err.message);
+      return;
+    }
+  }
+  // Lock already exists — steal it only if its owner is no longer running.
+  try {
+    const { pid } = JSON.parse(await fs.readFile(LOCK_FILE, 'utf8'));
+    if (typeof pid === 'number' && pid !== process.pid && isProcessAlive(pid)) {
+      canPersist = false;
+      console.warn(`Another LeadFlow process (pid ${pid}) already owns ${CACHE_FILE} — this process will run without disk persistence.`);
+      return;
+    }
+  } catch {
+    // Unreadable/corrupt lock file — treat it as stale and steal it below.
+  }
+  try {
+    await fs.writeFile(LOCK_FILE, lockData);
+    holdsLock = true;
+  } catch (err) {
+    console.error('Failed to steal stale cache lock file — persistence stays best-effort:', err.message);
+  }
+}
+
+let savingCache = false;
+async function saveCacheToDisk() {
+  const snapshot = {
+    savedAt: Date.now(),
+    agentsCache,
+    cache: mapToObj(cache),
+    stageCountsCache,
+    assigneeCache: mapToObj(assigneeCache),
+    historyCache: mapToObj(historyCache),
+    commentCache: mapToObj(commentCache),
+    stageHistoryCache: mapToObj(stageHistoryCache),
+  };
+  try {
+    await fs.mkdir(path.dirname(CACHE_FILE), { recursive: true });
+    // Write to a temp file and rename over the real one — rename() within
+    // the same directory is atomic on POSIX, so a crash mid-write can never
+    // leave CACHE_FILE truncated/corrupt; readers see the old complete file
+    // or the new complete file, never a partial one.
+    await fs.writeFile(CACHE_TMP_FILE, JSON.stringify(snapshot));
+    await fs.rename(CACHE_TMP_FILE, CACHE_FILE);
+  } catch (err) {
+    console.error('Failed to save cache snapshot:', err.message);
+  }
+}
+
+// Guards against overlapping saves (the periodic interval and a shutdown
+// signal landing at the same time), and against saving at all when another
+// live process already owns the cache file.
+async function saveCacheToDiskGuarded() {
+  if (!canPersist || savingCache) return;
+  savingCache = true;
+  try {
+    await saveCacheToDisk();
+  } finally {
+    savingCache = false;
+  }
+}
+
+async function loadCacheFromDisk() {
+  try {
+    const raw = await fs.readFile(CACHE_FILE, 'utf8');
+    const snapshot = JSON.parse(raw);
+    if (!isPlainObject(snapshot)) throw new Error('snapshot root is not an object');
+    if (isPlainObject(snapshot.agentsCache)) agentsCache = snapshot.agentsCache;
+    if (isPlainObject(snapshot.stageCountsCache)) stageCountsCache = snapshot.stageCountsCache;
+    if (isPlainObject(snapshot.cache)) objToMap(snapshot.cache, cache);
+    if (isPlainObject(snapshot.assigneeCache)) objToMap(snapshot.assigneeCache, assigneeCache);
+    if (isPlainObject(snapshot.historyCache)) objToMap(snapshot.historyCache, historyCache);
+    if (isPlainObject(snapshot.commentCache)) objToMap(snapshot.commentCache, commentCache);
+    if (isPlainObject(snapshot.stageHistoryCache)) objToMap(snapshot.stageHistoryCache, stageHistoryCache);
+    console.log(`Loaded cache snapshot from ${CACHE_FILE} (saved ${snapshot.savedAt ? new Date(snapshot.savedAt).toISOString() : 'unknown time'})`);
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.error(`Ignoring invalid cache file at ${CACHE_FILE}:`, err.message);
+    }
+    // No file, or a bad one — reset to a guaranteed-clean empty state rather
+    // than risk leaving caches half-hydrated from a partially-read snapshot.
+    agentsCache = { at: 0, value: null };
+    stageCountsCache = null;
+    cache.clear();
+    assigneeCache.clear();
+    historyCache.clear();
+    commentCache.clear();
+    stageHistoryCache.clear();
+  }
+  await acquireCacheLock();
+}
+
 const PORT = process.env.LEADFLOW_PORT || 3002;
-app.listen(PORT, () => {
-  console.log(`LeadFlow dashboard running at http://localhost:${PORT}`);
-  startRefreshLoop('today', 30_000);
-  setTimeout(() => startRefreshLoop('7d', 60_000), 5_000);
-  setTimeout(() => startRefreshLoop('30d', 120_000), 15_000);
-  setTimeout(() => startStageCountsRefreshLoop(60_000), 10_000);
-});
+
+(async () => {
+  // Hydrate caches from the last snapshot (if any) before serving traffic or
+  // starting the refresh loops, so a restart doesn't force a full cold
+  // re-scan of the current pipeline — see loadCacheFromDisk.
+  await loadCacheFromDisk();
+
+  app.listen(PORT, () => {
+    console.log(`LeadFlow dashboard running at http://localhost:${PORT}`);
+    startRefreshLoop('today', 30_000);
+    setTimeout(() => startRefreshLoop('7d', 60_000), 5_000);
+    setTimeout(() => startRefreshLoop('30d', 120_000), 15_000);
+    setTimeout(() => startStageCountsRefreshLoop(60_000), 10_000);
+    setInterval(saveCacheToDiskGuarded, CACHE_SAVE_INTERVAL_MS);
+  });
+})();
+
+// Best-effort save on a clean shutdown (Ctrl+C, `docker stop`, most process
+// managers). The periodic interval above is the primary mechanism — it's
+// what covers crashes and any restart path that doesn't reliably deliver
+// these signals (e.g. nodemon's own restart-on-file-change).
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, async () => {
+    await saveCacheToDiskGuarded();
+    // Release the lock on a clean exit so the next boot (which is likely
+    // imminent — a deploy or dev-server restart) can claim it immediately
+    // instead of waiting to detect a dead PID.
+    if (holdsLock) {
+      try { await fs.unlink(LOCK_FILE); } catch { /* already gone, fine */ }
+    }
+    process.exit(0);
+  });
+}
