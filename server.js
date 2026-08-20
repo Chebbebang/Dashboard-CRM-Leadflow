@@ -5,9 +5,10 @@
 //   2. Fresh Leads received - Primary     <- live now (leads created in range, by assignee)
 //   3. Fresh Leads received - Secondary   <- live now (Property Finder leads + Rental Leads deals created in range, by assignee)
 //   4. New Reshuffled Leads assigned      <- live now (leads that entered the Reshuffled stage in range, by current assignee)
-//   5. Leads Contacted                    <- live now (Reshuffled/Assigned/No Answer/Pool -> Warm/Hot/Cold, with same-day comment;
-//                                             PLUS any other timeline comment logged while a lead sits in Warm/Hot/Cold/Pool — for
-//                                             Pool leads specifically, credited to the comment's author, not the assignee)
+//   5. Leads Contacted                    <- live now (lead currently in Warm/Hot/Cold with a timeline comment in range from its
+//                                             current assignee, or in Leads Pool with a timeline comment in range from any active
+//                                             agent — credited to the comment's author for Pool, the assignee otherwise; comments
+//                                             on the same lead by the same person under 20 minutes apart don't stack)
 //   6. Leads no Answer                    <- live now (Reshuffled/Assigned/Junk/Pool -> No Answer, with same-day comment)
 //
 // Serves index.html (this dashboard's own page) as a static file and
@@ -408,21 +409,14 @@ async function fetchStageHistory(from, to) {
   const entries = best ? best.entries : tail;
   return entries.filter(e => e.CREATED_TIME >= from && e.CREATED_TIME <= to);
 }
-// Lead stages that count as "was being worked" before a real contact.
-const CONTACTED_FROM_STATUSES = ['UC_HKU9EC', 'UC_UYK1YZ', '4', 'UC_X8X2WR']; // Reshuffled-Assigned, Assigned, No Answer, Leads Pool
-// Lead stages that count as "contact made".
-const CONTACTED_TO_STATUSES = ['2', '7', '6']; // Warm, Hot, Cold
-
 // Lead stages that count as "was being worked" before landing in No Answer.
 const NO_ANSWER_FROM_STATUSES = ['UC_HKU9EC', 'UC_UYK1YZ', 'JUNK', 'UC_X8X2WR']; // Reshuffled-Assigned, Assigned, Junk, Leads Pool
 const NO_ANSWER_TO_STATUSES = ['4']; // No Answer
 
-// Both same-day-comment rules are evaluated in ONE pass over the stage
-// history, so a lead that qualifies under both rules (e.g. contacted one day,
-// no answer another) only pays for its per-lead history and comment lookups
-// once instead of twice.
+// "Leads Contacted" no longer runs through this transition-rule mechanism —
+// see fetchContactedCounts below — but "No Answer" still does, so the rule
+// list (and the same-day-comment machinery in fetchTransitionCounts) stays.
 const TRANSITION_RULES = [
-  { label: 'contacted', toStatuses: CONTACTED_TO_STATUSES, fromStatuses: CONTACTED_FROM_STATUSES },
   { label: 'noAnswer', toStatuses: NO_ANSWER_TO_STATUSES, fromStatuses: NO_ANSWER_FROM_STATUSES },
 ];
 
@@ -539,25 +533,32 @@ async function fetchTransitionCounts(toEntries, rules) {
 
 // Lead stage: "Leads Pool" (public/unassigned — anyone can comment on it).
 const LEADS_POOL_STATUS_ID = 'UC_X8X2WR';
-// Stages eligible for the comment-based "still working the lead" contact
-// credit, on top of the transition-based rule above.
+// Stages a lead must currently be sitting in to be eligible for "Leads
+// Contacted" credit.
 const COMMENT_CONTACT_STATUSES = { cold: '6', warm: '2', hot: '7', pool: LEADS_POOL_STATUS_ID };
+// Minimum gap between two comments on the same lead credited to the same
+// person, so rapid-fire/spammed comments can't farm multiple credits off one
+// lead — a real second contact is expected to be at least this far apart.
+const CONTACT_COMMENT_GAP_MS = 20 * 60_000;
 
-// Second source of "Leads Contacted" credit: a timeline comment logged while
-// a lead sits in Cold/Warm/Hot/Leads Pool, even with no stage change. This
-// catches follow-up work (a call logged, a note added) on a lead that's
-// already been contacted, which the transition rule can't see since it only
-// fires once per lead, on the day the lead *entered* that stage.
+// Sole source of "Leads Contacted" credit: a lead currently sitting in
+// Cold/Warm/Hot/Leads Pool with a timeline comment logged within range while
+// it was in that stage (i.e. posted after the stage-history entry that most
+// recently put it there — an old comment from an earlier stint in a
+// different stage doesn't count). For Cold/Warm/Hot, only a comment authored
+// by the lead's own current assignee counts. For Leads Pool, there's no
+// single responsible person (it's public — anyone can comment), so credit
+// goes to whichever active agent authored the comment instead.
 //
 // crm.timeline.comment.list requires ENTITY_ID — Bitrix has no way to ask
 // "which leads got a comment in [from, to]" across the whole CRM — so every
 // lead currently sitting in one of these stages has to be checked
 // individually (the whole current pipeline in these stages, not just leads
 // with in-range stage-history activity). That's expensive, but it reuses the
-// same historyCache/commentCache the transition rule above already pays for,
-// so the expensive scan only repeats on that cache's TTL (~5-15 min), not on
+// same historyCache/commentCache fetchTransitionCounts already pays for, so
+// the expensive scan only repeats on that cache's TTL (~5-15 min), not on
 // every "today" tick.
-async function fetchCommentContactCounts(from, to) {
+async function fetchContactedCounts(from, to) {
   const statusIds = Object.values(COMMENT_CONTACT_STATUSES);
   const leads = await bx.fetchAll(
     'crm.lead.list',
@@ -573,16 +574,17 @@ async function fetchCommentContactCounts(from, to) {
   const toMs = new Date(to).getTime();
 
   const counts = {};
-  // One credit per (person, lead, calendar day) — stops one person farming
-  // credit by posting several comments on the same lead the same day, while
-  // still letting two different agents each get credit for genuinely
-  // separate comments on a shared Pool lead the same day.
-  const seen = new Set();
-  function credit(uid, lid, day) {
+  // Last counted comment time per (person, lead), so the anti-spam gap is
+  // enforced independently per credited person — two different agents
+  // commenting on a shared Pool lead within the gap of each other still both
+  // count, since neither is spamming the other's credit.
+  const lastCountedAt = new Map(); // 'uid|lid' -> ms
+  function tryCredit(uid, lid, t) {
     if (uid == null) return;
-    const key = uid + '|' + lid + '|' + day;
-    if (seen.has(key)) return;
-    seen.add(key);
+    const key = uid + '|' + lid;
+    const last = lastCountedAt.get(key);
+    if (last != null && t - last < CONTACT_COMMENT_GAP_MS) return;
+    lastCountedAt.set(key, t);
     counts[uid] = (counts[uid] || 0) + 1;
   }
 
@@ -618,24 +620,29 @@ async function fetchCommentContactCounts(from, to) {
       if (!Array.isArray(history) || !history.length || !Array.isArray(comments)) continue;
 
       const boundaryMs = new Date(history[0].CREATED_TIME).getTime();
-      const boundaryDay = dubaiDateStr(history[0].CREATED_TIME);
       const isPool = lead.STATUS_ID === LEADS_POOL_STATUS_ID;
 
-      for (const c of comments) {
+      // Only comments within range, posted during the lead's *current* stint
+      // in this stage, processed oldest-first so the anti-spam gap is
+      // enforced in the order the comments actually happened.
+      const qualifying = comments
+        .filter(c => {
+          const t = new Date(c.CREATED).getTime();
+          return t >= fromMs && t <= toMs && t >= boundaryMs;
+        })
+        .sort((a, b) => new Date(a.CREATED) - new Date(b.CREATED));
+
+      for (const c of qualifying) {
         const t = new Date(c.CREATED).getTime();
-        // Only comments within range, and posted during the lead's *current*
-        // stint in this stage (not an earlier stint in a different stage).
-        if (t < fromMs || t > toMs || t < boundaryMs) continue;
-        const day = dubaiDateStr(c.CREATED);
+        const authorId = String(c.AUTHOR_ID);
         if (!isPool) {
-          // Same day the lead entered Cold/Warm/Hot is already covered by
-          // the transition rule above — don't pay for it twice.
-          if (day === boundaryDay) continue;
-          credit(lead.ASSIGNED_BY_ID, lid, day);
+          // Only the lead's own assignee personally commenting counts —
+          // someone else commenting on their lead doesn't credit them.
+          if (authorId !== String(lead.ASSIGNED_BY_ID)) continue;
+          tryCredit(lead.ASSIGNED_BY_ID, lid, t);
         } else {
-          const authorId = String(c.AUTHOR_ID);
           if (!activeAgentIds.has(authorId)) continue;
-          credit(authorId, lid, day);
+          tryCredit(authorId, lid, t);
         }
       }
     }
@@ -646,8 +653,8 @@ async function fetchCommentContactCounts(from, to) {
 
 async function computeDashboard(bounds) {
   const { from, to } = bounds;
-  // One scan of the lead stage-history table feeds all three stage-based
-  // columns (Reshuffled entries, Contacted candidates, No Answer candidates).
+  // One scan of the lead stage-history table feeds both stage-based columns
+  // that still use it (Reshuffled entries, No Answer candidates).
   // fetchStageHistory reuses a previously fetched scan for any window ending
   // "now" instead of re-scanning the table.
   const history = await fetchStageHistory(from, to);
@@ -661,15 +668,13 @@ async function computeDashboard(bounds) {
     fetchFreshLeadSecondaryCounts(from, to),
     countReshuffled(reshuffledEntries),
   ]);
-  // The heavy transition pass (per-lead stage-history + comment lookups) runs
-  // after the fetchers above, and evaluates both rules in one scan so its
-  // per-lead lookups are never paid twice. The comment-contact pass shares
-  // the same per-lead caches, so it runs alongside rather than after.
-  const [countsByRule, commentContactBy] = await Promise.all([
+  // The No Answer transition pass and the Contacted comment pass are
+  // independent but share the same per-lead history/comment caches, so they
+  // run alongside each other rather than one after the other.
+  const [countsByRule, contactedBy] = await Promise.all([
     fetchTransitionCounts(transitionEntries, TRANSITION_RULES),
-    fetchCommentContactCounts(from, to),
+    fetchContactedCounts(from, to),
   ]);
-  const contactedBy = countsByRule.contacted;
   const noAnswerBy = countsByRule.noAnswer;
 
   const rows = agents.map(a => ({
@@ -677,7 +682,7 @@ async function computeDashboard(bounds) {
     freshPrimary: freshPrimaryBy[a.id] || 0,
     freshSecondary: freshSecondaryBy[a.id] || 0,
     reshuffled: reshuffledBy[a.id] || 0,
-    contacted: (contactedBy[a.id] || 0) + (commentContactBy[a.id] || 0),
+    contacted: contactedBy[a.id] || 0,
     noAnswer: noAnswerBy[a.id] || 0,
   }));
 
