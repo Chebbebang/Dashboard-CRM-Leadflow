@@ -31,18 +31,76 @@ header .sub{ font-size:11px; color:var(--muted); letter-spacing:.05em; margin-to
 header .meta{ display:flex; flex-direction:column; align-items:flex-end; gap:6px; margin-bottom:0; }
 header .status{ display:flex; align-items:center; gap:6px; font-size:10px; color:var(--faint);
   letter-spacing:.08em; text-transform:uppercase; }
+header .status-loading{ color:var(--muted); }
+
+/* Icon-button group: always a single horizontal row, never wraps, shrinks
+   only via the buttons' own compact padding on narrow screens. */
+.icon-btns{ display:flex; flex-direction:row; flex-wrap:nowrap; align-items:center; gap:6px; }
 
 select.range{ background:var(--ctrl-bg); color:var(--ink); border:1px solid var(--line);
   border-radius:5px; font-family:inherit; font-weight:600; letter-spacing:.05em;
   text-transform:uppercase; cursor:pointer; padding:4px 8px; font-size:10px; }
 select.range:focus{ outline:1px solid var(--muted); }
 
+/* Custom datetime range pickers (shown when "Custom Range…" is selected). */
+.custom-range{ display:flex; align-items:center; gap:5px; }
+.custom-range .cr-label{ font-size:9px; letter-spacing:.08em; text-transform:uppercase; color:var(--faint); }
+.custom-range .cr-input{ background:var(--ctrl-bg); color:var(--ink); border:1px solid var(--line);
+  border-radius:5px; font-family:inherit; font-size:10px; padding:3px 6px; color-scheme:light; }
+:root[data-theme="dark"] .custom-range .cr-input{ color-scheme:dark; }
+.custom-range .cr-input:focus{ outline:1px solid var(--muted); }
+.custom-range .cr-apply{ background:var(--ctrl-active-bg); color:var(--ctrl-active-tx);
+  border:1px solid var(--ctrl-active-bg); border-radius:5px; font-family:inherit; font-weight:600;
+  font-size:9px; letter-spacing:.08em; text-transform:uppercase; cursor:pointer; padding:4px 9px; }
+.custom-range .cr-apply:disabled{ opacity:.4; cursor:not-allowed; }
+.custom-range .cr-hint{ font-size:9px; color:var(--danger); letter-spacing:.03em; }
+
 /* Icon toggle (theme picker) — single button showing the current mode;
    click cycles to the next one. No floating menu to position/clip. */
-.theme-btn{ display:flex; align-items:center; justify-content:center; background:var(--ctrl-bg);
-  color:var(--ink); border:1px solid var(--line); border-radius:5px; padding:5px 6px; cursor:pointer; }
+/* All header icon buttons (theme, info, refresh) share one fixed square size
+   so they always match, regardless of their icon/glyph's natural size — set
+   here and re-set together in the mobile breakpoint below. */
+.theme-btn, .info-btn, .refresh-btn{ display:flex; align-items:center; justify-content:center;
+  width:24px; height:24px; background:var(--ctrl-bg); color:var(--ink); border:1px solid var(--line);
+  border-radius:5px; padding:0; font-size:12px; line-height:1; cursor:pointer; flex:none; }
 .theme-btn svg{ width:12px; height:12px; flex:none; }
-.theme-btn:hover{ background:var(--row-hover); }
+.theme-btn:hover, .info-btn:hover, .refresh-btn:hover{ background:var(--row-hover); }
+
+/* Custom hover tooltip: reads its text off `data-tooltip` so any icon button
+   can opt in just by setting that attribute. Shown via CSS only (no JS/DOM),
+   positioned below the button so it doesn't get clipped by the page top. */
+[data-tooltip]{ position:relative; }
+[data-tooltip]::after{
+  content:attr(data-tooltip);
+  position:absolute; top:calc(100% + 7px); left:50%; transform:translateX(-50%) translateY(-4px);
+  background:var(--ink); color:var(--bg); font-size:10.5px; font-weight:600; letter-spacing:.02em;
+  text-transform:none; white-space:nowrap; padding:5px 8px; border-radius:5px;
+  box-shadow:0 4px 12px var(--shadow);
+  opacity:0; visibility:hidden; pointer-events:none; z-index:50;
+  transition:opacity .12s ease, transform .12s ease;
+}
+[data-tooltip]:hover::after, [data-tooltip]:focus-visible::after{
+  opacity:1; visibility:visible; transform:translateX(-50%) translateY(0);
+  transition-delay:.25s;
+}
+
+/* Column-info modal */
+.modal-backdrop{ position:fixed; inset:0; background:rgba(17,17,16,0.45);
+  display:flex; align-items:center; justify-content:center; padding:20px; z-index:100; }
+.modal-card{ background:var(--fill); border:1px solid var(--line); border-radius:8px;
+  max-width:560px; width:100%; max-height:80vh; overflow-y:auto;
+  box-shadow:0 12px 32px var(--shadow); }
+.modal-head{ display:flex; align-items:center; justify-content:space-between;
+  padding:14px 18px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--fill); }
+.modal-head h2{ font-size:13px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
+.modal-close{ background:none; border:none; color:var(--muted); font-size:14px; line-height:1;
+  cursor:pointer; padding:4px; }
+.modal-close:hover{ color:var(--ink); }
+.modal-body{ padding:14px 18px 18px; }
+.modal-body dt{ font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+  color:var(--ink); margin-top:14px; }
+.modal-body dt:first-child{ margin-top:0; }
+.modal-body dd{ font-size:12.5px; color:var(--muted); line-height:1.5; margin-top:4px; }
 
 .table-wrap{ width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; }
 table{ width:100%; min-width:640px; border-collapse:collapse; }
@@ -73,6 +131,12 @@ tfoot td.num.live{ color:var(--ink); font-weight:800; }
 .empty, .error{ padding:24px; text-align:center; color:var(--muted); font-size:12px; }
 .error{ color:var(--danger); }
 
+.stage-counts{ margin-top:56px; padding-top:16px; border-top:1px solid var(--line); }
+.stage-counts .section-head{ display:flex; align-items:center; justify-content:space-between;
+  margin-bottom:10px; flex-wrap:wrap; gap:8px; }
+.stage-counts .section-head h2{ font-size:13px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
+.stage-counts .status{ font-size:10px; color:var(--faint); letter-spacing:.08em; text-transform:uppercase; }
+
 @keyframes shimmer{ 0%{ background-position:150% 0; } 100%{ background-position:-150% 0; } }
 .skel{ display:inline-block; height:9px; border-radius:3px;
   background:linear-gradient(90deg, var(--line-soft) 25%, var(--line) 50%, var(--line-soft) 75%);
@@ -87,11 +151,16 @@ tfoot td.num.live{ color:var(--ink); font-weight:800; }
   header{ flex-wrap:wrap; gap:12px; }
   header h1{ font-size:14px; }
   header .sub{ font-size:10px; }
-  header .meta{ width:100%; flex-direction:row; align-items:center; justify-content:space-between; }
+  header .meta{ width:100%; flex-direction:row; flex-wrap:wrap; align-items:center; justify-content:space-between; }
   header .status{ font-size:9.5px; }
   select.range{ padding:7px 9px; font-size:10.5px; }
-  .theme-btn{ padding:7px 8px; }
-  .theme-btn svg{ width:14px; height:14px; }
+  .custom-range{ display:grid; grid-template-columns:auto 1fr; gap:6px 10px; flex-basis:100%; }
+  .custom-range .cr-label{ font-size:10px; align-self:center; }
+  .custom-range .cr-input{ width:100%; min-width:0; padding:9px 10px; font-size:12.5px; }
+  .custom-range .cr-apply{ grid-column:1 / -1; padding:10px; font-size:11px; }
+  .custom-range .cr-hint{ grid-column:1 / -1; }
+  .theme-btn, .info-btn, .refresh-btn{ width:34px; height:34px; font-size:14px; }
+  .theme-btn svg{ width:15px; height:15px; }
   thead th{ padding:8px 8px; font-size:9.5px; }
   tbody td{ padding:8px 8px; font-size:12.5px; height:auto; }
   tfoot td{ padding:9px 8px; }
