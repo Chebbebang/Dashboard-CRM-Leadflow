@@ -85,11 +85,11 @@ function ThemeToggle({ theme, setTheme }) {
 const COLUMNS = [
   {
     key: 'freshPrimary', label: 'Fresh Leads Received – Primary',
-    info: 'Leads created within the selected range, grouped by assigned agent.',
+    info: 'Leads created within the selected range that have since moved past the "1. Fresh" stage, grouped by assigned agent. Leads still sitting untouched in Fresh aren\'t counted as "received" yet.',
   },
   {
     key: 'freshSecondary', label: 'Fresh Leads Received – Secondary',
-    info: 'Property Finder–sourced leads, plus Rental Leads pipeline deals, created within the selected range, grouped by assigned agent.',
+    info: 'Property Finder–sourced leads, plus Rental Leads pipeline deals, created within the selected range that have since moved past their pipeline\'s Fresh stage, grouped by assigned agent.',
   },
   {
     key: 'reshuffled', label: 'New Reshuffled Leads Assigned',
@@ -97,7 +97,7 @@ const COLUMNS = [
   },
   {
     key: 'contacted', label: 'Leads Contacted',
-    info: 'Leads that moved directly from a "Lead Contacted" stage (Reshuffled - Assigned, Assigned, No Answer, Leads Pool, or Junk) into Warm, Hot, or Cold within the selected range, with a same-day timeline comment logged as evidence of real agent work. Credited to the lead\'s current assignee; only the earliest qualifying transition per lead counts.',
+    info: 'Two sources, added together: (1) leads that moved directly from a "being worked" stage (Reshuffled - Assigned, Assigned, No Answer, or Leads Pool) into Warm, Hot, or Cold within the selected range, with a same-day timeline comment logged as evidence of real agent work credited to the lead\'s current assignee, only the earliest qualifying transition per lead counts; plus (2) any other timeline comment logged within range while a lead sits in Warm, Hot, Cold, or Leads Pool with no stage change that day credited to the lead\'s current assignee, or for Leads Pool to the comment\'s author (since it\'s public and anyone can comment), capped at one credit per person per lead per day.',
   },
   {
     key: 'noAnswer', label: 'Leads No Answer',
@@ -194,10 +194,6 @@ function StageCountsTable() {
   const [updatedAt, setUpdatedAt] = useState(null);
   const [sortKey, setSortKey] = useState('total');
   const [sortDir, setSortDir] = useState('desc');
-  const [refreshTick, setRefreshTick] = useState(0);
-  // Set right before bumping refreshTick so only that one fetch (not the
-  // subsequent 60s polls) asks the server to bypass its cache.
-  const forceRef = useRef(false);
 
   function handleSort(key) {
     if (sortKey === key) {
@@ -225,12 +221,10 @@ function StageCountsTable() {
 
   useEffect(() => {
     let cancelled = false;
-    const force = forceRef.current;
-    forceRef.current = false;
 
-    async function load(isForced) {
+    async function load() {
       try {
-        const r = await fetch('/api/leadflow/stage-counts' + (isForced ? '?force=1' : ''));
+        const r = await fetch('/api/leadflow/stage-counts');
         const d = await r.json().catch(() => null);
         if (!r.ok) throw new Error(d?.error || 'Request failed: ' + r.status);
         if (cancelled) return;
@@ -242,10 +236,10 @@ function StageCountsTable() {
       }
     }
 
-    load(force);
-    const id = setInterval(() => load(false), POLL);
+    load();
+    const id = setInterval(load, POLL);
     return () => { cancelled = true; clearInterval(id); };
-  }, [refreshTick]);
+  }, []);
 
   const lastUpdated = updatedAt
     ? new Date(updatedAt).toLocaleTimeString('en-GB', { timeZone: 'Asia/Dubai', hour: '2-digit', minute: '2-digit' })
@@ -255,13 +249,6 @@ function StageCountsTable() {
     h('div', { className: 'section-head' },
       h('h2', null, 'Current Pipeline by Stage'),
       h('div', { className: 'icon-btns' },
-        h('button', {
-          type: 'button',
-          className: 'refresh-btn',
-          'data-tooltip': 'Refresh this table',
-          'aria-label': 'Refresh this table',
-          onClick: () => { forceRef.current = true; setRefreshTick(t => t + 1); },
-        }, '⟳'),
         h('div', { className: 'status' }, `Updated ${lastUpdated}`),
       ),
     ),

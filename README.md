@@ -56,13 +56,13 @@ Responses are never HTTP-cached (`Cache-Control: no-store`) so you always see li
 
 | Column | Rule |
 |---|---|
-| **Fresh Leads Received – Primary** | Leads created in range, grouped by assigned agent. |
-| **Fresh Leads Received – Secondary** | Property Finder–sourced leads + Rental Leads pipeline deals created in range, grouped by assigned agent. |
+| **Fresh Leads Received – Primary** | Leads created in range that have since moved past the "1. Fresh" stage, grouped by assigned agent. Leads still sitting untouched in Fresh aren't counted as "received" yet. |
+| **Fresh Leads Received – Secondary** | Property Finder–sourced leads + Rental Leads pipeline deals created in range that have since moved past their pipeline's Fresh stage, grouped by assigned agent. |
 | **New Reshuffled Leads Assigned** | Leads whose stage-history shows an entry into "Reshuffled - Assigned" within range, grouped by the lead's *current* assignee. |
-| **Leads Contacted** | Leads that moved directly from a "being worked" stage (Reshuffled-Assigned, Assigned, No Answer, Leads Pool) into Warm/Hot/Cold within range, **and** have a same-day timeline comment logged. Credited to the lead's current assignee; only the earliest qualifying transition per lead counts. |
-| **Leads No Answer** | Same mechanism as Contacted, but for transitions from a "being worked" stage (Reshuffled-Assigned, Assigned, Junk, Leads Pool) directly into "No Answer", with a same-day timeline comment required. |
+| **Leads Contacted** | Two sources, added together: (1) Leads that moved directly from a "being worked" stage (Reshuffled-Assigned, Assigned, No Answer, Leads Pool) into Warm/Hot/Cold within range, **and** have a same-day timeline comment logged — credited to the lead's current assignee, only the earliest qualifying transition per lead counts; plus (2) any *other* timeline comment logged within range while a lead sits in Warm/Hot/Cold/Leads Pool with no stage change that day (follow-up work on an already-contacted lead) — credited to the lead's current assignee for Warm/Hot/Cold, or to the **comment's author** for Leads Pool (since it's public and anyone can comment), capped at one credit per person per lead per day. |
+| **Leads No Answer** | Same mechanism as Contacted's first source, but for transitions from a "being worked" stage (Reshuffled-Assigned, Assigned, Junk, Leads Pool) directly into "No Answer", with a same-day timeline comment required. |
 
-The same-day-comment requirement exists so a stage move with no evidence of actual agent work (e.g. a stale/automated transition) doesn't get counted. "Same-day comment" checks Bitrix24's **timeline comments** (`crm.timeline.comment.list`), not the lead's static `COMMENTS` field.
+The same-day-comment requirement (source 1) exists so a stage move with no evidence of actual agent work (e.g. a stale/automated transition) doesn't get counted. "Timeline comment" means Bitrix24's **timeline comments** (`crm.timeline.comment.list`), not the lead's static `COMMENTS` field.
 
 The dashboard's ⓘ button shows this same column-by-column breakdown in-app.
 
@@ -83,7 +83,7 @@ No range/date params — always reflects the live pipeline right now. Counts eac
 
 ### Forcing a live refresh
 
-Both endpoints accept `&force=1` (or `?force=1` on `stage-counts`) to bypass the in-memory cache and wait for a fresh Bitrix recompute instead of returning whatever the background loop last cached. This is what the dashboard's per-table ⟳ refresh buttons use; a forced request can take several seconds to tens of seconds since it's a real live query, not a cache hit.
+Both endpoints accept `&force=1` (or `?force=1` on `stage-counts`) to bypass the in-memory cache and wait for a fresh Bitrix recompute instead of returning whatever the background loop last cached. This is what the Lead Flow table's ⟳ refresh button uses — the "Current Pipeline by Stage" table has no refresh button and only ever relies on its 60s poll, though its endpoint still supports `force=1` for scripting/debugging. A forced request can take several seconds to tens of seconds since it's a real live query, not a cache hit.
 
 Agents shown (both endpoints) are active users in the Sales (5) or Client Managers (29) departments, excluding a small hardcoded list of non-agent accounts (CEO, marketing manager, generic system account).
 
@@ -94,7 +94,7 @@ server.js          Express app: routes, dashboard computation, caching/refresh l
 bitrix.js           Minimal Bitrix24 REST client (batching, pagination, retries)
 public/
   index.html         Page shell
-  app.js             React dashboard (both tables, sorting, theme toggle, per-table refresh, column-info modal, polling)
+  app.js             React dashboard (both tables, sorting, theme toggle, Lead Flow table's refresh button, column-info modal, polling)
   styles.css         Styling, light/dark theme, responsive layout
   theme-init.js       Applies saved theme before first paint (avoids flash)
   vendor/            Production React/ReactDOM bundles (no CDN/build step)

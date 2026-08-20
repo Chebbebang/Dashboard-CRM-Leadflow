@@ -5,7 +5,9 @@
 //   2. Fresh Leads received - Primary     <- live now (leads created in range, by assignee)
 //   3. Fresh Leads received - Secondary   <- live now (Property Finder leads + Rental Leads deals created in range, by assignee)
 //   4. New Reshuffled Leads assigned      <- live now (leads that entered the Reshuffled stage in range, by current assignee)
-//   5. Leads Contacted                    <- live now (Reshuffled/Assigned/No Answer/Pool -> Warm/Hot/Cold, with same-day comment)
+//   5. Leads Contacted                    <- live now (Reshuffled/Assigned/No Answer/Pool -> Warm/Hot/Cold, with same-day comment;
+//                                             PLUS any other timeline comment logged while a lead sits in Warm/Hot/Cold/Pool — for
+//                                             Pool leads specifically, credited to the comment's author, not the assignee)
 //   6. Leads no Answer                    <- live now (Reshuffled/Assigned/Junk/Pool -> No Answer, with same-day comment)
 //
 // Serves index.html (this dashboard's own page) as a static file and
@@ -269,28 +271,36 @@ async function mapChunks(items, fn, { chunkSize = 50, concurrency = 3, paceMs = 
   }));
 }
 
-// Counts leads created within [from, to], grouped by assigned agent.
+// Lead stage: "1. Fresh" (a lead's initial status, before anyone works it).
+const FRESH_LEAD_STATUS_ID = 'NEW';
+// Rental Leads deal pipeline's equivalent first stage.
+const FRESH_RENTAL_DEAL_STAGE_ID = 'C13:NEW';
+
+// Counts leads created within [from, to] that have since moved past the
+// Fresh stage, grouped by assigned agent — a lead still sitting untouched in
+// Fresh isn't counted as "received" yet.
 async function fetchFreshLeadCounts(from, to) {
   const leads = await bx.fetchAll(
     'crm.lead.list',
-    { '>=DATE_CREATE': from, '<=DATE_CREATE': to },
+    { '>=DATE_CREATE': from, '<=DATE_CREATE': to, '!STATUS_ID': FRESH_LEAD_STATUS_ID },
     ['ID', 'ASSIGNED_BY_ID'],
   );
   return countByAssignee(leads);
 }
 
 // Counts Property Finder leads + Rental Leads pipeline deals created within
-// [from, to], grouped by assigned agent.
+// [from, to] that have since moved past their pipeline's Fresh stage,
+// grouped by assigned agent.
 async function fetchFreshLeadSecondaryCounts(from, to) {
   const [pfLeads, rentalDeals] = await Promise.all([
     bx.fetchAll(
       'crm.lead.list',
-      { '>=DATE_CREATE': from, '<=DATE_CREATE': to, SOURCE_ID: PROPERTY_FINDER_SOURCE_ID },
+      { '>=DATE_CREATE': from, '<=DATE_CREATE': to, SOURCE_ID: PROPERTY_FINDER_SOURCE_ID, '!STATUS_ID': FRESH_LEAD_STATUS_ID },
       ['ID', 'ASSIGNED_BY_ID'],
     ),
     bx.fetchAll(
       'crm.deal.list',
-      { '>=DATE_CREATE': from, '<=DATE_CREATE': to, CATEGORY_ID: RENTAL_LEADS_CATEGORY_ID },
+      { '>=DATE_CREATE': from, '<=DATE_CREATE': to, CATEGORY_ID: RENTAL_LEADS_CATEGORY_ID, '!STAGE_ID': FRESH_RENTAL_DEAL_STAGE_ID },
       ['ID', 'ASSIGNED_BY_ID'],
     ),
   ]);
@@ -527,6 +537,105 @@ async function fetchTransitionCounts(toEntries, rules) {
   return countsByRule;
 }
 
+// Lead stage: "Leads Pool" (public/unassigned — anyone can comment on it).
+const LEADS_POOL_STATUS_ID = 'UC_X8X2WR';
+// Stages eligible for the comment-based "still working the lead" contact
+// credit, on top of the transition-based rule above.
+const COMMENT_CONTACT_STATUSES = { cold: '6', warm: '2', hot: '7', pool: LEADS_POOL_STATUS_ID };
+
+// Second source of "Leads Contacted" credit: a timeline comment logged while
+// a lead sits in Cold/Warm/Hot/Leads Pool, even with no stage change. This
+// catches follow-up work (a call logged, a note added) on a lead that's
+// already been contacted, which the transition rule can't see since it only
+// fires once per lead, on the day the lead *entered* that stage.
+//
+// crm.timeline.comment.list requires ENTITY_ID — Bitrix has no way to ask
+// "which leads got a comment in [from, to]" across the whole CRM — so every
+// lead currently sitting in one of these stages has to be checked
+// individually (the whole current pipeline in these stages, not just leads
+// with in-range stage-history activity). That's expensive, but it reuses the
+// same historyCache/commentCache the transition rule above already pays for,
+// so the expensive scan only repeats on that cache's TTL (~5-15 min), not on
+// every "today" tick.
+async function fetchCommentContactCounts(from, to) {
+  const statusIds = Object.values(COMMENT_CONTACT_STATUSES);
+  const leads = await bx.fetchAll(
+    'crm.lead.list',
+    { '@STATUS_ID': statusIds },
+    ['ID', 'STATUS_ID', 'ASSIGNED_BY_ID'],
+  );
+  if (!leads.length) return {};
+
+  const activeAgents = await fetchActiveAgents();
+  const activeAgentIds = new Set(activeAgents.map(a => String(a.id)));
+
+  const fromMs = new Date(from).getTime();
+  const toMs = new Date(to).getTime();
+
+  const counts = {};
+  // One credit per (person, lead, calendar day) — stops one person farming
+  // credit by posting several comments on the same lead the same day, while
+  // still letting two different agents each get credit for genuinely
+  // separate comments on a shared Pool lead the same day.
+  const seen = new Set();
+  function credit(uid, lid, day) {
+    if (uid == null) return;
+    const key = uid + '|' + lid + '|' + day;
+    if (seen.has(key)) return;
+    seen.add(key);
+    counts[uid] = (counts[uid] || 0) + 1;
+  }
+
+  await mapChunks(leads, async chunk => {
+    const toFetchHistory = chunk.filter(l => cacheGet(historyCache, String(l.ID), HISTORY_TTL_MS) === undefined);
+    const toFetchComments = chunk.filter(l => cacheGet(commentCache, String(l.ID), COMMENT_TTL_MS) === undefined);
+    const cmd = {};
+    for (const l of toFetchHistory) {
+      cmd['h' + l.ID] = `crm.stagehistory.list?entityTypeId=1&filter[OWNER_ID]=${l.ID}&order[CREATED_TIME]=DESC&select[0]=ID&select[1]=STATUS_ID&select[2]=CREATED_TIME&limit=8`;
+    }
+    for (const l of toFetchComments) {
+      cmd['c' + l.ID] = `crm.timeline.comment.list?filter[ENTITY_TYPE]=LEAD&filter[ENTITY_ID]=${l.ID}`;
+    }
+    const items = Object.keys(cmd).length ? await bx.batch(cmd) : {};
+
+    for (const lead of chunk) {
+      const lid = String(lead.ID);
+      const history = items['h' + lid] ?? cacheGet(historyCache, lid, HISTORY_TTL_MS);
+      const comments = items['c' + lid] ?? cacheGet(commentCache, lid, COMMENT_TTL_MS);
+      if (items['h' + lid] !== undefined) cachePut(historyCache, lid, items['h' + lid]);
+      if (items['c' + lid] !== undefined) cachePut(commentCache, lid, items['c' + lid]);
+      // No stage-history entry means there's no evidence of when the lead
+      // entered its current stage, so there's nothing to compare comments
+      // against — skip rather than guess.
+      if (!Array.isArray(history) || !history.length || !Array.isArray(comments)) continue;
+
+      const boundaryMs = new Date(history[0].CREATED_TIME).getTime();
+      const boundaryDay = dubaiDateStr(history[0].CREATED_TIME);
+      const isPool = lead.STATUS_ID === LEADS_POOL_STATUS_ID;
+
+      for (const c of comments) {
+        const t = new Date(c.CREATED).getTime();
+        // Only comments within range, and posted during the lead's *current*
+        // stint in this stage (not an earlier stint in a different stage).
+        if (t < fromMs || t > toMs || t < boundaryMs) continue;
+        const day = dubaiDateStr(c.CREATED);
+        if (!isPool) {
+          // Same day the lead entered Cold/Warm/Hot is already covered by
+          // the transition rule above — don't pay for it twice.
+          if (day === boundaryDay) continue;
+          credit(lead.ASSIGNED_BY_ID, lid, day);
+        } else {
+          const authorId = String(c.AUTHOR_ID);
+          if (!activeAgentIds.has(authorId)) continue;
+          credit(authorId, lid, day);
+        }
+      }
+    }
+  });
+
+  return counts;
+}
+
 async function computeDashboard(bounds) {
   const { from, to } = bounds;
   // One scan of the lead stage-history table feeds all three stage-based
@@ -546,8 +655,12 @@ async function computeDashboard(bounds) {
   ]);
   // The heavy transition pass (per-lead stage-history + comment lookups) runs
   // after the fetchers above, and evaluates both rules in one scan so its
-  // per-lead lookups are never paid twice.
-  const countsByRule = await fetchTransitionCounts(transitionEntries, TRANSITION_RULES);
+  // per-lead lookups are never paid twice. The comment-contact pass shares
+  // the same per-lead caches, so it runs alongside rather than after.
+  const [countsByRule, commentContactBy] = await Promise.all([
+    fetchTransitionCounts(transitionEntries, TRANSITION_RULES),
+    fetchCommentContactCounts(from, to),
+  ]);
   const contactedBy = countsByRule.contacted;
   const noAnswerBy = countsByRule.noAnswer;
 
@@ -556,7 +669,7 @@ async function computeDashboard(bounds) {
     freshPrimary: freshPrimaryBy[a.id] || 0,
     freshSecondary: freshSecondaryBy[a.id] || 0,
     reshuffled: reshuffledBy[a.id] || 0,
-    contacted: contactedBy[a.id] || 0,
+    contacted: (contactedBy[a.id] || 0) + (commentContactBy[a.id] || 0),
     noAnswer: noAnswerBy[a.id] || 0,
   }));
 
