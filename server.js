@@ -281,11 +281,17 @@ const FRESH_RENTAL_DEAL_STAGE_ID = 'C13:NEW';
 
 // Counts leads created within [from, to] that have since moved past the
 // Fresh stage, grouped by assigned agent — a lead still sitting untouched in
-// Fresh isn't counted as "received" yet.
+// Fresh isn't counted as "received" yet. Property Finder leads are excluded
+// since they're counted under "Fresh Leads received - Secondary" instead.
 async function fetchFreshLeadCounts(from, to) {
   const leads = await bx.fetchAll(
     'crm.lead.list',
-    { '>=DATE_CREATE': from, '<=DATE_CREATE': to, '!STATUS_ID': FRESH_LEAD_STATUS_ID },
+    {
+      '>=DATE_CREATE': from,
+      '<=DATE_CREATE': to,
+      '!STATUS_ID': FRESH_LEAD_STATUS_ID,
+      '!SOURCE_ID': PROPERTY_FINDER_SOURCE_ID,
+    },
     ['ID', 'ASSIGNED_BY_ID'],
   );
   return countByAssignee(leads);

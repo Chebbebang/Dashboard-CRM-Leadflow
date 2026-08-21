@@ -56,7 +56,7 @@ Responses are never HTTP-cached (`Cache-Control: no-store`) so you always see li
 
 | Column | Rule |
 |---|---|
-| **Fresh Leads Received – Primary** | Leads created in range that have since moved past the "1. Fresh" stage, grouped by assigned agent. Leads still sitting untouched in Fresh aren't counted as "received" yet. |
+| **Fresh Leads Received – Primary** | Leads created in range that have since moved past the "1. Fresh" stage, grouped by assigned agent. Leads still sitting untouched in Fresh aren't counted as "received" yet. Property Finder–sourced leads are excluded (they're counted under Secondary instead). |
 | **Fresh Leads Received – Secondary** | Property Finder–sourced leads + Rental Leads pipeline deals created in range that have since moved past their pipeline's Fresh stage, grouped by assigned agent. |
 | **New Reshuffled Leads Assigned** | Leads whose stage-history shows an entry into "Reshuffled - Assigned" within range, grouped by the lead's *current* assignee. |
 | **Leads Contacted** | A lead currently sitting in Warm/Hot/Cold counts if it has a timeline comment logged within range, posted during its current stint in that stage, **authored by the lead's own current assignee** — credited to that assignee. A lead currently in Leads Pool counts the same way, except since Pool has no single responsible person, credit goes to **whichever active agent authored the comment**. Comments credited to the same person on the same lead less than 20 minutes apart only count once, so spammed comments can't farm extra credit. |

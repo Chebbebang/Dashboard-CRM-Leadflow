@@ -85,7 +85,7 @@ function ThemeToggle({ theme, setTheme }) {
 const COLUMNS = [
   {
     key: 'freshPrimary', label: 'Fresh Leads Received – Primary',
-    info: 'Leads created within the selected range that have since moved past the "1. Fresh" stage, grouped by assigned agent. Leads still sitting untouched in Fresh aren\'t counted as "received" yet.',
+    info: 'Leads created within the selected range that have since moved past the "1. Fresh" stage, grouped by assigned agent. Leads still sitting untouched in Fresh aren\'t counted as "received" yet. Property Finder–sourced leads are excluded (they\'re counted under Secondary instead).',
   },
   {
     key: 'freshSecondary', label: 'Fresh Leads Received – Secondary',
